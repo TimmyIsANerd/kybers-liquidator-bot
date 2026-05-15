@@ -86,7 +86,22 @@ export async function processWalletImport(ctx: BotContext, text: string): Promis
     return;
   }
 
-  // Check for duplicate
+  // ── Guard 1: Check if another user already owns this wallet (cross-user) ──
+  const { mongoStorage } = await import('../../storage/mongodb.js');
+  const userId = ctx.from!.id.toString();
+  const globalCheck = await mongoStorage.isWalletAddressTaken(wallet.address, userId);
+
+  if (globalCheck.taken) {
+    await ctx.reply(
+      `🚫 <b>Wallet Already In Use</b>\n\n` +
+      `<code>${wallet.address}</code>\n\n` +
+      `This wallet is already registered by another user and cannot be imported again.`,
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
+  // ── Guard 2: Check within the current user's own wallet list ──────────────
   const existing = (ctx.session.wallets ?? []).find(w => {
     try {
       const dec = decryptWallet(w);
@@ -96,8 +111,8 @@ export async function processWalletImport(ctx: BotContext, text: string): Promis
 
   if (existing) {
     await ctx.reply(
-      `⚠️ <b>Wallet Already Exists</b>\n\n` +
-      `Address: <code>${wallet.address}</code>\n` +
+      `⚠️ <b>Wallet Already Added</b>\n\n` +
+      `<code>${wallet.address}</code>\n` +
       `This wallet is already in your account.`,
       { parse_mode: 'HTML' },
     );

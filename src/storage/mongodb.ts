@@ -92,6 +92,29 @@ export class MongoDBStorage implements StorageAdapter<SessionData> {
     const docs = await this.collection.find({}).toArray();
     return docs.map(d => ({ userId: d.userId, data: d.data }));
   }
+
+  /**
+   * Check if a wallet address is already registered by ANY user.
+   * Used to prevent two users from importing the same wallet.
+   */
+  async isWalletAddressTaken(
+    address: string,
+    excludeUserId?: string,
+  ): Promise<{ taken: boolean; byUserId?: string }> {
+    if (!this.connected) await this.connect();
+    const normalised = address.toLowerCase();
+    // Use aggregation to search inside the nested wallets array
+    const result = await this.collection.findOne({
+      ...(excludeUserId ? { userId: { $ne: excludeUserId } } : {}),
+      'data.wallets': {
+        $elemMatch: {
+          address: { $regex: new RegExp(`^${normalised}$`, 'i') },
+        },
+      },
+    });
+    if (result) return { taken: true, byUserId: result.userId };
+    return { taken: false };
+  }
 }
 
 // Singleton instance

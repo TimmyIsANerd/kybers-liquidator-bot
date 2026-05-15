@@ -15,6 +15,16 @@ import { KYBER_CHAIN_SLUG, KYBER_NATIVE, WRAPPED_NATIVE } from '../config/chains
 
 const AGGREGATOR_API_URL = 'https://aggregator-api.kyberswap.com';
 
+// ─── Platform Fee Config ──────────────────────────────────────────────────────
+
+/**
+ * Trading fee collected on every successful liquidation swap.
+ * KyberSwap uses "per cent mille" (pcm) units: 1 pcm = 0.001%, so 1% = 1000 pcm.
+ * The fee is deducted from the swap output and sent to FEE_RECEIVER on-chain.
+ */
+export const FEE_RECEIVER = '0x29A54694cDf4bC3e8b2665ae29b852475db0982d' as const;
+export const FEE_PCM      = 1000; // 1% (1000 / 100_000 = 0.01 = 1%)
+
 // ─── Proxy & Axios Setup ──────────────────────────────────────────────────────
 
 const proxyUrl = process.env.KYBERSWAP_PROXY_URL || process.env.RESIDENTIAL_PROXY_URL || null;
@@ -64,6 +74,7 @@ function normalizeForKyber(address: string, chainId: SupportedChain): string {
 
 /**
  * Get optimal swap route from KyberSwap Aggregator.
+ * Includes the 1% platform fee params so KyberSwap handles the fee on-chain.
  */
 export async function getSwapRoute(
   chainId: SupportedChain,
@@ -74,11 +85,14 @@ export async function getSwapRoute(
   const slug = getSlug(chainId);
   const res = await kyberAxios.get(`${AGGREGATOR_API_URL}/${slug}/api/v1/routes`, {
     params: {
-      tokenIn: normalizeForKyber(tokenIn, chainId),
-      tokenOut: normalizeForKyber(tokenOut, chainId),
+      tokenIn:     normalizeForKyber(tokenIn, chainId),
+      tokenOut:    normalizeForKyber(tokenOut, chainId),
       amountIn,
-      saveGas: 0,
-      gasInclude: 1,
+      saveGas:     0,
+      gasInclude:  1,
+      // Platform fee: 1% collected on-chain, sent to FEE_RECEIVER
+      feeAddress:  FEE_RECEIVER,
+      feePcm:      FEE_PCM,
     },
     ...getHeaders(),
   });
@@ -104,6 +118,7 @@ export async function buildSwapTransaction(
 
 /**
  * Get swap calldata (quote + build in one call).
+ * A 1% platform fee is automatically included in the route via feeAddress + feePcm.
  * Returns the raw transaction to sign + broadcast, and the expected output amount.
  */
 export async function getSwapCallData(params: {

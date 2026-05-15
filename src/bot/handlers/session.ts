@@ -137,18 +137,14 @@ export async function processSessionTokenAddress(ctx: BotContext, address: strin
     }
 
     // Save token info
-    setup.tokenAddress = address.trim();
-    setup.tokenSymbol  = tokenInfo.symbol;
-    setup.tokenName    = tokenInfo.name;
-    setup.tokenLogo    = tokenInfo.logo;
+    setup.tokenAddress  = address.trim();
+    setup.tokenSymbol   = tokenInfo.symbol;
+    setup.tokenName     = tokenInfo.name;
+    setup.tokenLogo     = tokenInfo.logo;
     setup.tokenDecimals = tokenInfo.decimals;
-    setup.step = 'usd_amount';
+    setup.step          = 'usd_amount';
 
-    // Build token info card
-    const priceStr = tokenInfo.priceUsd ? `$${parseFloat(tokenInfo.priceUsd).toFixed(8)}` : 'N/A';
-    const liqStr   = tokenInfo.liquidity ? `$${tokenInfo.liquidity.toLocaleString()}` : 'N/A';
-    const mcStr    = tokenInfo.marketCap ? `$${tokenInfo.marketCap.toLocaleString()}` : 'N/A';
-
+    // Build USD preset keyboard
     const keyboard = new InlineKeyboard();
     USD_PRESETS.forEach((usd, i) => {
       keyboard.text(`$${usd}`, `session:setup:usd:${usd}`);
@@ -157,10 +153,13 @@ export async function processSessionTokenAddress(ctx: BotContext, address: strin
     keyboard.row().text('✏️ Custom Amount', 'session:setup:usd:custom').row();
     keyboard.text('❌ Cancel', 'nav:sessions');
 
-    await ctx.api.editMessageText(ctx.chat!.id, loadingMsg.message_id,
+    const priceStr = tokenInfo.priceUsd ? `$${parseFloat(tokenInfo.priceUsd).toFixed(8)}` : 'N/A';
+    const liqStr   = tokenInfo.liquidity ? `$${tokenInfo.liquidity.toLocaleString()}` : 'N/A';
+    const mcStr    = tokenInfo.marketCap ? `$${tokenInfo.marketCap.toLocaleString()}` : 'N/A';
+
+    const caption =
       `✅ <b>Token Found!</b>\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
-      (tokenInfo.logo ? `🖼️ <a href="${tokenInfo.logo}">View Logo</a>\n` : '') +
       `🪙 <b>Name:</b> ${esc(tokenInfo.name)}\n` +
       `📊 <b>Symbol:</b> ${esc(tokenInfo.symbol)}\n` +
       `🔢 <b>Decimals:</b> ${tokenInfo.decimals}\n` +
@@ -168,16 +167,43 @@ export async function processSessionTokenAddress(ctx: BotContext, address: strin
       `💧 <b>Liquidity:</b> ${liqStr}\n` +
       `📈 <b>Market Cap:</b> ${mcStr}\n` +
       `━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `<b>Step 4 of 5:</b> How much USD to sell per cycle? 💸`,
-      { parse_mode: 'HTML', reply_markup: keyboard, link_preview_options: { is_disabled: true } },
-    );
+      `<b>Step 4 of 5:</b> How much USD to sell per cycle? 💸`;
+
+    // Delete the loading message first
+    try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch { /* ignore */ }
+
+    if (tokenInfo.logo) {
+      // Send the logo as a photo with the token card as caption + buttons
+      try {
+        await ctx.api.sendPhoto(ctx.chat!.id, tokenInfo.logo, {
+          caption,
+          parse_mode: 'HTML',
+          reply_markup: keyboard,
+        });
+        return;
+      } catch {
+        // Logo URL failed (e.g. Telegram can't fetch it) — fall through to text
+      }
+    }
+
+    // No logo or photo send failed — plain text message
+    await ctx.reply(caption, {
+      parse_mode: 'HTML',
+      reply_markup: keyboard,
+    });
+
   } catch (err: any) {
-    await ctx.api.editMessageText(ctx.chat!.id, loadingMsg.message_id,
-      `❌ <b>Error:</b> ${esc(err.message)}\n\nPlease try again.`,
-      { parse_mode: 'HTML' },
-    );
+    try {
+      await ctx.api.editMessageText(ctx.chat!.id, loadingMsg.message_id,
+        `❌ <b>Error:</b> ${esc(err.message)}\n\nPlease try again.`,
+        { parse_mode: 'HTML' },
+      );
+    } catch {
+      await ctx.reply(`❌ <b>Error:</b> ${esc(err.message)}`, { parse_mode: 'HTML' });
+    }
   }
 }
+
 
 // ─── Step 4: USD Amount ───────────────────────────────────────────────────────
 
