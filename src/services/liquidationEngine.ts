@@ -8,11 +8,11 @@
  *  2. Get live USD price from DexScreener
  *  3. Compute rawAmountIn = usdTarget / priceUsd
  *  4. Check native gas balance
- *  5. Get KyberSwap calldata
+ *  5. Get KyberSwap calldata (with slippage-retry: auto-bumps on failure)
  *  6. Approve if needed (separate tx)
  *  7. Send swap tx, wait for receipt
  *  8. Notify user via Telegram
- *  9. Update session stats in MongoDB
+ *  9. Update session stats + learned slippage in MongoDB
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -51,6 +51,32 @@ function sleep(ms: number): Promise<void> {
 
 function esc(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ─── Slippage Retry Config ────────────────────────────────────────────────────
+
+const SLIPPAGE_BUMP     = 0.01;  // bump by 1% per retry
+const SLIPPAGE_MAX      = 0.15;  // never exceed 15%
+const SLIPPAGE_RETRIES  = 3;     // max retry attempts on slippage errors
+
+/**
+ * Returns true when an error message indicates a slippage / price-impact
+ * failure from the DEX or the KyberSwap router.
+ */
+function isSlippageError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('slippage') ||
+    lower.includes('insufficient output') ||
+    lower.includes('insufficient_output_amount') ||
+    lower.includes('price impact') ||
+    lower.includes('minreturn') ||
+    lower.includes('min_return') ||
+    lower.includes('too little received') ||
+    lower.includes('exceeds max') ||
+    lower.includes('amount out is not sufficient') ||
+    lower.includes('execution reverted') // generic revert often = slippage on DEX
+  );
 }
 
 // ─── Engine ───────────────────────────────────────────────────────────────────
@@ -259,86 +285,138 @@ class LiquidationEngine {
         return;
       }
 
-      // ── 5. Get KyberSwap swap calldata ────────────────────────────────────
-      const { tx, dstAmount } = await getSwapCallData({
-        chainId:   session.chainId,
-        tokenIn:   session.tokenAddress,
-        tokenOut:  KYBER_NATIVE,
-        amountIn:  rawAmountIn.toString(),
-        from:      account.address,
-        slippage:  session.slippage,
-      });
+      // ── 5. KyberSwap: quote + build tx (with slippage-retry) ─────────────
+      let effectiveSlippage = session.slippage;
+      let tx!: Awaited<ReturnType<typeof getSwapCallData>>['tx'];
+      let dstAmount = '0';
+      let swapSucceeded = false;
+      let slippageWasBumped = false;
 
-      // ── 6. Approve if needed ──────────────────────────────────────────────
-      if (allowance < rawAmountIn) {
-        console.log(`[ENGINE] 🔓 Approving ${kyberRouter} for ${rawAmountIn}`);
-        const approvalHash = await walletClient.writeContract({
-          address: session.tokenAddress as Address,
-          abi: ERC20_ABI,
-          functionName: 'approve',
-          args: [kyberRouter as Address, rawAmountIn * 2n],
-          account,
-          chain,
-        });
-        console.log(`[ENGINE] Approval tx: ${approvalHash}`);
-        await publicClient.waitForTransactionReceipt({ hash: approvalHash });
-        console.log(`[ENGINE] ✅ Approval confirmed`);
+      for (let attempt = 1; attempt <= SLIPPAGE_RETRIES + 1; attempt++) {
+        try {
+          const swapData = await getSwapCallData({
+            chainId:  session.chainId,
+            tokenIn:  session.tokenAddress,
+            tokenOut: KYBER_NATIVE,
+            amountIn: rawAmountIn.toString(),
+            from:     account.address,
+            slippage: effectiveSlippage,
+          });
+          tx = swapData.tx;
+          dstAmount = swapData.dstAmount;
+
+          // ── 6. Approve if needed ─────────────────────────────────────────
+          if (allowance < rawAmountIn) {
+            console.log(`[ENGINE] 🔓 Approving ${kyberRouter} for ${rawAmountIn}`);
+            const approvalHash = await walletClient.writeContract({
+              address: session.tokenAddress as Address,
+              abi: ERC20_ABI,
+              functionName: 'approve',
+              args: [kyberRouter as Address, rawAmountIn * 2n],
+              account,
+              chain,
+            });
+            await publicClient.waitForTransactionReceipt({ hash: approvalHash });
+            console.log(`[ENGINE] ✅ Approval confirmed: ${approvalHash}`);
+          }
+
+          // ── 7. Send swap tx ──────────────────────────────────────────────
+          const txHash = await walletClient.sendTransaction({
+            to:       tx.to,
+            data:     tx.data,
+            value:    tx.value,
+            gas:      tx.gas,
+            gasPrice: tx.gasPrice,
+            account,
+            chain,
+          });
+
+          console.log(`[ENGINE] 📤 Swap tx sent: ${txHash}`);
+          const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+          if (receipt.status === 'reverted') {
+            throw new Error('Transaction reverted on-chain');
+          }
+
+          console.log(`[ENGINE] ✅ Confirmed in block ${receipt.blockNumber}`);
+
+          // ── 8. Calculate amounts for notification ────────────────────────
+          const soldTokenAmount = formatTokenAmount(rawAmountIn, session.tokenDecimals, 4);
+          const receivedNative  = formatUnits(BigInt(dstAmount || '0'), 18);
+          const usdSold         = Number(rawAmountIn) / (10 ** session.tokenDecimals) * priceUsd;
+
+          // ── 9. Update session stats + persist learned slippage ───────────
+          session.lastRanAt    = Date.now();
+          session.totalCycles  += 1;
+          session.totalSoldUsd += usdSold;
+
+          // Persist bumped slippage so future cycles start from learned value
+          if (slippageWasBumped) {
+            session.slippage = effectiveSlippage;
+            console.log(`[ENGINE] 📚 Learned slippage saved: ${(effectiveSlippage * 100).toFixed(1)}%`);
+          }
+
+          // If we sold ALL remaining tokens, auto-pause
+          const isLastSell = rawAmountIn >= maxRawAmountIn;
+          if (isLastSell) {
+            await this.pauseByLowBalance(userData, sessionIndex, userId);
+          } else {
+            userData.liquidationSessions[sessionIndex] = session;
+            await mongoStorage.write(userId, userData);
+          }
+
+          // ── 10. Notify success ───────────────────────────────────────────
+          const txUrl = `${scanUrl}${txHash}`;
+          let msg =
+            `🎉 <b>Liquidation Complete!</b>\n` +
+            `━━━━━━━━━━━━━━━━━━━━\n` +
+            `💼 <b>Wallet:</b> <code>${account.address.slice(0, 6)}...${account.address.slice(-4)}</code>\n` +
+            `🔗 <b>Chain:</b> ${chainName}\n` +
+            `🪙 <b>Token:</b> ${esc(session.tokenSymbol)}\n` +
+            `📤 <b>Sold:</b> ${soldTokenAmount} ${esc(session.tokenSymbol)} (~$${usdSold.toFixed(2)})\n` +
+            `💰 <b>Received:</b> ${parseFloat(receivedNative).toFixed(6)} ${nativeCurrency}\n` +
+            `🔗 <a href="${txUrl}">View Transaction</a>\n` +
+            `📊 <b>Total Cycles:</b> ${session.totalCycles} | <b>Total Sold:</b> $${session.totalSoldUsd.toFixed(2)}\n` +
+            `⏰ <b>Next run in:</b> ${session.intervalMinutes} minutes`;
+
+          if (slippageWasBumped) {
+            msg += `\n\n📚 <i>Slippage auto-adjusted to ${(session.slippage * 100).toFixed(1)}% (learned from failure)</i>`;
+          }
+          if (isLastSell) {
+            msg += `\n\n⏸️ <b>Session auto-paused</b> — token balance depleted.`;
+          }
+
+          await this.notifyUser(bot, userId, msg);
+          swapSucceeded = true;
+          break; // ← exit retry loop
+
+        } catch (swapErr: any) {
+          const swapMsg = swapErr?.message || String(swapErr);
+          console.warn(`[ENGINE] ⚠️ Swap attempt ${attempt} failed: ${swapMsg.slice(0, 120)}`);
+
+          if (isSlippageError(swapMsg) && attempt <= SLIPPAGE_RETRIES) {
+            const newSlippage = Math.min(effectiveSlippage + SLIPPAGE_BUMP, SLIPPAGE_MAX);
+            console.log(
+              `[ENGINE] 📈 Slippage error detected — bumping ${(effectiveSlippage * 100).toFixed(1)}% → ${(newSlippage * 100).toFixed(1)}% (retry ${attempt}/${SLIPPAGE_RETRIES})`,
+            );
+
+            await this.notifyUser(bot, userId,
+              `🔄 <b>Slippage Retry</b>\n\n` +
+              `🪙 Token: <b>${esc(session.tokenSymbol)}</b> | ${chainName}\n` +
+              `📈 Bumping slippage: ${(effectiveSlippage * 100).toFixed(1)}% → ${(newSlippage * 100).toFixed(1)}%\n` +
+              `<i>Attempt ${attempt} of ${SLIPPAGE_RETRIES}...</i>`,
+            );
+
+            effectiveSlippage = newSlippage;
+            slippageWasBumped = true;
+            await sleep(1500); // brief pause before retry
+            continue;
+          }
+
+          // Not a slippage error or retries exhausted — propagate to outer catch
+          throw swapErr;
+        }
       }
-
-      // ── 7. Send swap tx ───────────────────────────────────────────────────
-      const txHash = await walletClient.sendTransaction({
-        to:       tx.to,
-        data:     tx.data,
-        value:    tx.value,
-        gas:      tx.gas,
-        gasPrice: tx.gasPrice,
-        account,
-        chain,
-      });
-
-      console.log(`[ENGINE] 📤 Swap tx sent: ${txHash}`);
-      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-      console.log(`[ENGINE] ✅ Confirmed in block ${receipt.blockNumber}`);
-
-      // ── 8. Calculate amounts for notification ─────────────────────────────
-      const soldTokenAmount = formatTokenAmount(rawAmountIn, session.tokenDecimals, 4);
-      const receivedNative  = formatUnits(BigInt(dstAmount || '0'), 18);
-      const approxUsd       = (rawAmountIn / BigInt(10 ** session.tokenDecimals)) * BigInt(Math.floor(priceUsd));
-      const usdSold         = Number(rawAmountIn) / (10 ** session.tokenDecimals) * priceUsd;
-
-      // ── 9. Update session stats ───────────────────────────────────────────
-      session.lastRanAt    = Date.now();
-      session.totalCycles  += 1;
-      session.totalSoldUsd += usdSold;
-
-      // If we sold ALL remaining tokens, auto-pause
-      const isLastSell = rawAmountIn >= maxRawAmountIn;
-      if (isLastSell) {
-        await this.pauseByLowBalance(userData, sessionIndex, userId);
-      } else {
-        userData.liquidationSessions[sessionIndex] = session;
-        await mongoStorage.write(userId, userData);
-      }
-
-      // ── 10. Notify success ────────────────────────────────────────────────
-      const txUrl = `${scanUrl}${txHash}`;
-      let msg =
-        `🎉 <b>Liquidation Complete!</b>\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `💼 <b>Wallet:</b> <code>${account.address.slice(0, 6)}...${account.address.slice(-4)}</code>\n` +
-        `🔗 <b>Chain:</b> ${chainName}\n` +
-        `🪙 <b>Token:</b> ${esc(session.tokenSymbol)}\n` +
-        `📤 <b>Sold:</b> ${soldTokenAmount} ${esc(session.tokenSymbol)} (~$${usdSold.toFixed(2)})\n` +
-        `💰 <b>Received:</b> ${parseFloat(receivedNative).toFixed(6)} ${nativeCurrency}\n` +
-        `🔗 <a href="${txUrl}">View Transaction</a>\n` +
-        `📊 <b>Total Cycles:</b> ${session.totalCycles} | <b>Total Sold:</b> $${session.totalSoldUsd.toFixed(2)}\n` +
-        `⏰ <b>Next run in:</b> ${session.intervalMinutes} minutes`;
-
-      if (isLastSell) {
-        msg += `\n\n⏸️ <b>Session auto-paused</b> — token balance depleted.`;
-      }
-
-      await this.notifyUser(bot, userId, msg);
 
     } catch (err: any) {
       const message = err?.message || String(err);
