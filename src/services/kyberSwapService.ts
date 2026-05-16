@@ -19,11 +19,11 @@ const AGGREGATOR_API_URL = 'https://aggregator-api.kyberswap.com';
 
 /**
  * Trading fee collected on every successful liquidation swap.
- * KyberSwap uses "per cent mille" (pcm) units: 1 pcm = 0.001%, so 1% = 1000 pcm.
+ * KyberSwap uses "per cent mille" (pcm) units: 1 pcm = 0.001%, so 5% = 5000 pcm.
  * The fee is deducted from the swap output and sent to FEE_RECEIVER on-chain.
  */
 export const FEE_RECEIVER = '0x29A54694cDf4bC3e8b2665ae29b852475db0982d' as const;
-export const FEE_PCM      = 1000; // 1% (1000 / 100_000 = 0.01 = 1%)
+export const FEE_PCM      = 5000; // 5% (5000 / 100_000 = 0.05 = 5%)
 
 // ─── Proxy & Axios Setup ──────────────────────────────────────────────────────
 
