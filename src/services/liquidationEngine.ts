@@ -111,6 +111,15 @@ class LiquidationEngine {
     const intervalMs = session.intervalMinutes * 60 * 1000;
     console.log(`[ENGINE] ▶️ Starting session ${session.id} (every ${session.intervalMinutes}m)`);
 
+    // Run cycle immediately in the background
+    setTimeout(async () => {
+      try {
+        await this.runCycle(bot, session.id, wallet, userId);
+      } catch (err) {
+        console.error(`[ENGINE] Uncaught error in immediate run for session ${session.id}:`, err);
+      }
+    }, 0);
+
     const timer = setInterval(async () => {
       try {
         await this.runCycle(bot, session.id, wallet, userId);
@@ -285,23 +294,6 @@ class LiquidationEngine {
         // Sell all remaining, then auto-pause
         rawAmountIn = maxRawAmountIn;
         console.log(`[ENGINE] Balance less than target — selling all remaining (${formattedBalance} ${session.tokenSymbol})`);
-      }
-
-      // ── 4. Check native gas balance ───────────────────────────────────────
-      const nativeBalance = await publicClient.getBalance({ address: account.address });
-      const MIN_GAS_WEI   = parseUnits('0.003', 18); // ~$8-12 worth of ETH/BNB for gas
-
-      if (nativeBalance < MIN_GAS_WEI) {
-        await this.notifyUser(bot, userId,
-          `⛽ <b>Low Gas Warning!</b>\n\n` +
-          `💼 Wallet: <code>${account.address}</code>\n` +
-          `🔗 Chain: ${chainName}\n` +
-          `❌ Insufficient ${nativeCurrency} for gas fees.\n` +
-          `💰 Balance: <code>${formatUnits(nativeBalance, 18)} ${nativeCurrency}</code>\n\n` +
-          `💡 Deposit some ${nativeCurrency} to continue.\n` +
-          `🔄 Will retry next cycle in ${session.intervalMinutes} minutes.`,
-        );
-        return;
       }
 
       // ── 5. KyberSwap: quote + build tx (with slippage-retry) ─────────────
