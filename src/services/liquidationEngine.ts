@@ -27,7 +27,7 @@ import type { Bot } from 'grammy';
 import { privateKeyToAccount } from 'viem/accounts';
 import type { BotContext, LiquidationSession, SessionData, Wallet } from '../types/index.js';
 import { CHAIN_CURRENCY, CHAIN_NAMES, CHAIN_SCAN_URL, SupportedChain } from '../types/index.js';
-import { getChain, getTransport, KYBER_NATIVE } from '../config/chains.js';
+import { getChain, getTransport, KYBER_NATIVE, USDT_ADDRESS } from '../config/chains.js';
 import { ERC20_ABI, getBalanceAndAllowanceMulticall } from '../libs/erc20.js';
 import { getDexScreenerTokenInfo } from '../libs/dexScreener.js';
 import { getSwapCallData } from './kyberSwapService.js';
@@ -77,6 +77,17 @@ function isSlippageError(message: string): boolean {
     lower.includes('amount out is not sufficient') ||
     lower.includes('execution reverted') // generic revert often = slippage on DEX
   );
+}
+
+function getTargetTokenDecimals(tokenAddress: string, chainId: SupportedChain): number {
+  if (tokenAddress.toLowerCase() === KYBER_NATIVE.toLowerCase()) {
+    return 18;
+  }
+  const usdtAddr = USDT_ADDRESS[chainId];
+  if (usdtAddr && tokenAddress.toLowerCase() === usdtAddr.toLowerCase()) {
+    return chainId === SupportedChain.ETH ? 6 : 18;
+  }
+  return 18;
 }
 
 // ─── Engine ───────────────────────────────────────────────────────────────────
@@ -297,7 +308,7 @@ class LiquidationEngine {
           const swapData = await getSwapCallData({
             chainId:  session.chainId,
             tokenIn:  session.tokenAddress,
-            tokenOut: KYBER_NATIVE,
+            tokenOut: session.targetTokenAddress || KYBER_NATIVE,
             amountIn: rawAmountIn.toString(),
             from:     account.address,
             slippage: effectiveSlippage,
@@ -342,7 +353,9 @@ class LiquidationEngine {
 
           // ── 8. Calculate amounts for notification ────────────────────────
           const soldTokenAmount = formatTokenAmount(rawAmountIn, session.tokenDecimals, 4);
-          const receivedNative  = formatUnits(BigInt(dstAmount || '0'), 18);
+          const targetSymbol    = session.targetTokenSymbol || nativeCurrency;
+          const targetDecimals  = getTargetTokenDecimals(session.targetTokenAddress || KYBER_NATIVE, session.chainId);
+          const receivedAmount  = formatUnits(BigInt(dstAmount || '0'), targetDecimals);
           const usdSold         = Number(rawAmountIn) / (10 ** session.tokenDecimals) * priceUsd;
 
           // ── 9. Update session stats + persist learned slippage ───────────
@@ -356,10 +369,18 @@ class LiquidationEngine {
             console.log(`[ENGINE] 📚 Learned slippage saved: ${(effectiveSlippage * 100).toFixed(1)}%`);
           }
 
-          // If we sold ALL remaining tokens, auto-pause
+          // If we sold ALL remaining tokens or reached cycles limit, deactivate
           const isLastSell = rawAmountIn >= maxRawAmountIn;
-          if (isLastSell) {
-            await this.pauseByLowBalance(userData, sessionIndex, userId);
+          const isMaxCyclesReached = !!(session.maxCycles && session.totalCycles >= session.maxCycles);
+
+          if (isLastSell || isMaxCyclesReached) {
+            session.active = false;
+            if (isLastSell) {
+              session.pausedByLowBalance = true;
+            }
+            userData.liquidationSessions[sessionIndex] = session;
+            await mongoStorage.write(userId, userData);
+            this.stop(sessionId);
           } else {
             userData.liquidationSessions[sessionIndex] = session;
             await mongoStorage.write(userId, userData);
@@ -374,16 +395,23 @@ class LiquidationEngine {
             `🔗 <b>Chain:</b> ${chainName}\n` +
             `🪙 <b>Token:</b> ${esc(session.tokenSymbol)}\n` +
             `📤 <b>Sold:</b> ${soldTokenAmount} ${esc(session.tokenSymbol)} (~$${usdSold.toFixed(2)})\n` +
-            `💰 <b>Received:</b> ${parseFloat(receivedNative).toFixed(6)} ${nativeCurrency}\n` +
+            `💰 <b>Received:</b> ${parseFloat(receivedAmount).toFixed(6)} ${targetSymbol}\n` +
             `🔗 <a href="${txUrl}">View Transaction</a>\n` +
-            `📊 <b>Total Cycles:</b> ${session.totalCycles} | <b>Total Sold:</b> $${session.totalSoldUsd.toFixed(2)}\n` +
-            `⏰ <b>Next run in:</b> ${session.intervalMinutes} minutes`;
+            `📊 <b>Total Cycles:</b> ${session.totalCycles}${session.maxCycles ? `/${session.maxCycles}` : ''} | <b>Total Sold:</b> $${session.totalSoldUsd.toFixed(2)}\n`;
+
+          if (isLastSell || isMaxCyclesReached) {
+            // No next run time
+          } else {
+            msg += `⏰ <b>Next run in:</b> ${session.intervalMinutes} minutes`;
+          }
 
           if (slippageWasBumped) {
             msg += `\n\n📚 <i>Slippage auto-adjusted to ${(session.slippage * 100).toFixed(1)}% (learned from failure)</i>`;
           }
           if (isLastSell) {
             msg += `\n\n⏸️ <b>Session auto-paused</b> — token balance depleted.`;
+          } else if (isMaxCyclesReached) {
+            msg += `\n\n🏁 <b>Session Completed</b> — reached maximum cycles limit of ${session.maxCycles}.`;
           }
 
           await this.notifyUser(bot, userId, msg);

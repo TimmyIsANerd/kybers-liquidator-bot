@@ -27,7 +27,10 @@ import {
   handleSessionWalletChosen,
   handleSessionChainChosen,
   processSessionTokenAddress,
+  handleSessionTargetChosen,
   handleSessionUsdAmount,
+  handleSessionCyclesChosen,
+  processSessionCustomCycles,
   handleSessionInterval,
   processSessionCustomUsd,
   processSessionCustomInterval,
@@ -199,6 +202,12 @@ export function createBot(): Bot<BotContext> {
       return handleSessionChainChosen(ctx, chainId);
     }
 
+    // Wizard: target chosen
+    if (data.startsWith('session:setup:target:')) {
+      const target = data.replace('session:setup:target:', '') as 'native' | 'usdt';
+      return handleSessionTargetChosen(ctx, target);
+    }
+
     // Wizard: USD amount preset
     if (data.startsWith('session:setup:usd:')) {
       const val = data.replace('session:setup:usd:', '');
@@ -216,6 +225,25 @@ export function createBot(): Bot<BotContext> {
         return;
       }
       return handleSessionUsdAmount(ctx, parseFloat(val));
+    }
+
+    // Wizard: cycles preset
+    if (data.startsWith('session:setup:cycles:')) {
+      const val = data.replace('session:setup:cycles:', '');
+      if (val === 'custom') {
+        if (ctx.session.pendingSessionSetup) {
+          ctx.session.pendingSessionSetup.step = 'max_cycles';
+        }
+        const msg = await ctx.reply(
+          `✏️ <b>Custom Cycle Limit</b>\n\nEnter the number of cycles to execute (e.g. 15, or 0 for unlimited):`,
+          { parse_mode: 'HTML' },
+        );
+        if (ctx.session.pendingSessionSetup) {
+          ctx.session.pendingSessionSetup.promptMessageId = msg.message_id;
+        }
+        return;
+      }
+      return handleSessionCyclesChosen(ctx, parseInt(val, 10));
     }
 
     // Wizard: interval preset
@@ -296,6 +324,9 @@ export function createBot(): Bot<BotContext> {
       }
       if (setup.step === 'usd_amount') {
         return processSessionCustomUsd(ctx, text.trim());
+      }
+      if (setup.step === 'max_cycles') {
+        return processSessionCustomCycles(ctx, text.trim());
       }
       if (setup.step === 'interval') {
         return processSessionCustomInterval(ctx, text.trim());

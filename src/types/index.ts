@@ -62,6 +62,12 @@ export interface LiquidationSession {
   totalCycles: number;
   /** Paused by low balance (auto-pause) */
   pausedByLowBalance?: boolean;
+  /** Target token address to swap to (e.g. KYBER_NATIVE or USDT) */
+  targetTokenAddress?: string;
+  /** Target token symbol (e.g. ETH, BNB, USDT) */
+  targetTokenSymbol?: string;
+  /** Max cycles/times to sell (0 or undefined for unlimited) */
+  maxCycles?: number;
 }
 
 // ─── Session State (per-user wizard state) ────────────────────────────────────
@@ -72,7 +78,7 @@ export interface PendingWalletImport {
 }
 
 export interface PendingSessionSetup {
-  step: 'chain' | 'token' | 'usd_amount' | 'interval' | 'slippage' | 'confirm';
+  step: 'chain' | 'token' | 'target_asset' | 'usd_amount' | 'max_cycles' | 'interval' | 'slippage' | 'confirm';
   walletId?: string;
   chainId?: SupportedChain;
   tokenAddress?: string;
@@ -84,6 +90,9 @@ export interface PendingSessionSetup {
   intervalMinutes?: number;
   slippage?: number;
   promptMessageId?: number;
+  targetTokenAddress?: string;
+  targetTokenSymbol?: string;
+  maxCycles?: number;
 }
 
 // ─── Grammy Session Data ──────────────────────────────────────────────────────

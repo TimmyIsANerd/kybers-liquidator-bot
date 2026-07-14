@@ -11,6 +11,7 @@ import { CHAIN_NAMES, CHAIN_CURRENCY } from '../../types/index.js';
 import { resolveToken } from '../../services/tokenService.js';
 import { decryptWallet, maskAddress } from '../../services/walletService.js';
 import { liquidationEngine } from '../../services/liquidationEngine.js';
+import { KYBER_NATIVE, USDT_ADDRESS } from '../../config/chains.js';
 import { randomBytes } from 'node:crypto';
 
 function esc(text: string): string {
@@ -142,16 +143,15 @@ export async function processSessionTokenAddress(ctx: BotContext, address: strin
     setup.tokenName     = tokenInfo.name;
     setup.tokenLogo     = tokenInfo.logo;
     setup.tokenDecimals = tokenInfo.decimals;
-    setup.step          = 'usd_amount';
+    setup.step          = 'target_asset';
 
-    // Build USD preset keyboard
-    const keyboard = new InlineKeyboard();
-    USD_PRESETS.forEach((usd, i) => {
-      keyboard.text(`$${usd}`, `session:setup:usd:${usd}`);
-      if ((i + 1) % 3 === 0) keyboard.row();
-    });
-    keyboard.row().text('✏️ Custom Amount', 'session:setup:usd:custom').row();
-    keyboard.text('❌ Cancel', 'nav:sessions');
+    const nativeCurrency = CHAIN_CURRENCY[setup.chainId];
+    const keyboard = new InlineKeyboard()
+      .text(`🪙 Native (${nativeCurrency})`, 'session:setup:target:native')
+      .row()
+      .text('💵 Stablecoin (USDT)', 'session:setup:target:usdt')
+      .row()
+      .text('❌ Cancel', 'nav:sessions');
 
     const priceStr = tokenInfo.priceUsd ? `$${parseFloat(tokenInfo.priceUsd).toFixed(8)}` : 'N/A';
     const liqStr   = tokenInfo.liquidity ? `$${tokenInfo.liquidity.toLocaleString()}` : 'N/A';
@@ -167,7 +167,8 @@ export async function processSessionTokenAddress(ctx: BotContext, address: strin
       `💧 <b>Liquidity:</b> ${liqStr}\n` +
       `📈 <b>Market Cap:</b> ${mcStr}\n` +
       `━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `<b>Step 4 of 5:</b> How much USD to sell per cycle? 💸`;
+      `<b>Step 4 of 7:</b> Choose Target Currency 🔀\n\n` +
+      `Which currency do you want to liquidate <b>${esc(tokenInfo.symbol)}</b> into?`;
 
     // Delete the loading message first
     try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch { /* ignore */ }
@@ -204,39 +205,72 @@ export async function processSessionTokenAddress(ctx: BotContext, address: strin
   }
 }
 
+// ─── Step 4: Choose Target Currency ───────────────────────────────────────────
 
-// ─── Step 4: USD Amount ───────────────────────────────────────────────────────
+export async function handleSessionTargetChosen(ctx: BotContext, target: 'native' | 'usdt'): Promise<void> {
+  const setup = ctx.session.pendingSessionSetup;
+  if (!setup || !setup.chainId) return;
+
+  setup.targetTokenAddress = target === 'native' ? KYBER_NATIVE : USDT_ADDRESS[setup.chainId];
+  setup.targetTokenSymbol  = target === 'native' ? CHAIN_CURRENCY[setup.chainId] : 'USDT';
+  setup.step               = 'usd_amount';
+
+  // Build USD preset keyboard
+  const keyboard = new InlineKeyboard();
+  USD_PRESETS.forEach((usd, i) => {
+    keyboard.text(`$${usd}`, `session:setup:usd:${usd}`);
+    if ((i + 1) % 3 === 0) keyboard.row();
+  });
+  keyboard.row().text('✏️ Custom Amount', 'session:setup:usd:custom').row();
+  keyboard.text('❌ Cancel', 'nav:sessions');
+
+  const text =
+    `⚙️ <b>New Liquidation Session</b>\n` +
+    `<b>Step 5 of 7:</b> How much USD to sell per cycle? 💸\n\n` +
+    `Swapping to: <b>${setup.targetTokenSymbol}</b>\n\n` +
+    `Select a preset or enter a custom USD amount:`;
+
+  if (ctx.callbackQuery?.message) {
+    try { await ctx.api.deleteMessage(ctx.chat!.id, ctx.callbackQuery.message.message_id); } catch { /* ignore */ }
+  }
+
+  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
+}
+
+// ─── Step 5: USD Amount ───────────────────────────────────────────────────────
 
 export async function handleSessionUsdAmount(ctx: BotContext, usdAmount: number): Promise<void> {
   const setup = ctx.session.pendingSessionSetup;
   if (!setup) return;
   setup.usdAmountPerCycle = usdAmount;
-  setup.step = 'interval';
+  setup.step = 'max_cycles';
 
-  const keyboard = new InlineKeyboard();
-  INTERVAL_PRESETS.forEach((mins, i) => {
-    const label = mins < 60 ? `${mins}m` : `${mins / 60}h`;
-    keyboard.text(label, `session:setup:interval:${mins}`);
-    if ((i + 1) % 3 === 0) keyboard.row();
-  });
-  keyboard.row().text('✏️ Custom Interval', 'session:setup:interval:custom').row();
-  keyboard.text('❌ Cancel', 'nav:sessions');
+  const keyboard = new InlineKeyboard()
+    .text('Unlimited ♾️', 'session:setup:cycles:0')
+    .row()
+    .text('5 times', 'session:setup:cycles:5')
+    .text('10 times', 'session:setup:cycles:10')
+    .row()
+    .text('20 times', 'session:setup:cycles:20')
+    .text('50 times', 'session:setup:cycles:50')
+    .row()
+    .text('✏️ Custom Cycles', 'session:setup:cycles:custom')
+    .row()
+    .text('❌ Cancel', 'nav:sessions');
 
-  try {
-    await ctx.editMessageText(
-      `⚙️ <b>New Liquidation Session</b>\n\n` +
-      `<b>Step 5 of 5:</b> Choose Interval ⏰\n\n` +
-      `USD per cycle: <b>$${usdAmount}</b>\n\n` +
-      `How often should the bot sell?\n` +
-      `<i>Minimum: 5 minutes</i>`,
-      { parse_mode: 'HTML', reply_markup: keyboard },
-    );
-  } catch {
-    await ctx.reply(
-      `<b>Step 5 of 5:</b> Choose Interval ⏰\n\nHow often should the bot sell?`,
-      { parse_mode: 'HTML', reply_markup: keyboard },
-    );
+  const text =
+    `⚙️ <b>New Liquidation Session</b>\n\n` +
+    `<b>Step 6 of 7:</b> Set Cycle Limit 🔄\n\n` +
+    `USD per cycle: <b>$${usdAmount}</b>\n` +
+    `Swapping to: <b>${setup.targetTokenSymbol}</b>\n\n` +
+    `How many times/cycles do you want to sell?\n` +
+    `<i>Choose a preset or enter custom value (e.g. 15). Select Unlimited to sell indefinitely.</i>`;
+
+  if (ctx.callbackQuery?.message) {
+    try { await ctx.api.deleteMessage(ctx.chat!.id, ctx.callbackQuery.message.message_id); } catch { /* ignore */ }
   }
+
+  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
 }
 
 // ─── Handle custom USD input ──────────────────────────────────────────────────
@@ -254,7 +288,61 @@ export async function processSessionCustomUsd(ctx: BotContext, text: string): Pr
   await handleSessionUsdAmount(ctx, amount);
 }
 
-// ─── Step 5: Interval ─────────────────────────────────────────────────────────
+// ─── Step 6: Choose Cycles Limit ──────────────────────────────────────────────
+
+export async function handleSessionCyclesChosen(ctx: BotContext, maxCycles: number): Promise<void> {
+  const setup = ctx.session.pendingSessionSetup;
+  if (!setup) return;
+
+  setup.maxCycles = maxCycles;
+  setup.step = 'interval';
+
+  const keyboard = new InlineKeyboard();
+  INTERVAL_PRESETS.forEach((mins, i) => {
+    const label = mins < 60 ? `${mins}m` : `${mins / 60}h`;
+    keyboard.text(label, `session:setup:interval:${mins}`);
+    if ((i + 1) % 3 === 0) keyboard.row();
+  });
+  keyboard.row().text('✏️ Custom Interval', 'session:setup:interval:custom').row();
+  keyboard.text('❌ Cancel', 'nav:sessions');
+
+  const cyclesLabel = maxCycles > 0 ? `${maxCycles} cycles` : 'Unlimited ♾️';
+  const text =
+    `⚙️ <b>New Liquidation Session</b>\n\n` +
+    `<b>Step 7 of 7:</b> Choose Interval ⏰\n\n` +
+    `USD per cycle: <b>$${setup.usdAmountPerCycle}</b>\n` +
+    `Swapping to: <b>${setup.targetTokenSymbol}</b>\n` +
+    `Cycles limit: <b>${cyclesLabel}</b>\n\n` +
+    `How often should the bot sell?\n` +
+    `<i>Minimum: 5 minutes</i>`;
+
+  if (ctx.callbackQuery?.message) {
+    try { await ctx.api.deleteMessage(ctx.chat!.id, ctx.callbackQuery.message.message_id); } catch { /* ignore */ }
+  }
+
+  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
+}
+
+export async function processSessionCustomCycles(ctx: BotContext, text: string): Promise<void> {
+  const setup = ctx.session.pendingSessionSetup;
+  if (!setup || setup.step !== 'max_cycles') return;
+
+  // Delete prompt if any
+  if (setup.promptMessageId) {
+    try { await ctx.api.deleteMessage(ctx.chat!.id, setup.promptMessageId); } catch { /* ignore */ }
+  }
+
+  const cycles = parseInt(text, 10);
+  if (isNaN(cycles) || cycles < 0) {
+    const msg = await ctx.reply('❌ Please enter a valid non-negative integer for cycles (e.g. 10 or 0 for unlimited):', { parse_mode: 'HTML' });
+    setup.promptMessageId = msg.message_id;
+    return;
+  }
+
+  await handleSessionCyclesChosen(ctx, cycles);
+}
+
+// ─── Step 7: Interval ─────────────────────────────────────────────────────────
 
 export async function handleSessionInterval(ctx: BotContext, intervalMinutes: number): Promise<void> {
   const setup = ctx.session.pendingSessionSetup;
@@ -287,7 +375,7 @@ export async function processSessionCustomInterval(ctx: BotContext, text: string
 
 // ─── Confirmation ─────────────────────────────────────────────────────────────
 
-async function showConfirmation(ctx: BotContext): Promise<void> {
+export async function showConfirmation(ctx: BotContext): Promise<void> {
   const setup = ctx.session.pendingSessionSetup!;
   const wallets = ctx.session.wallets ?? [];
   const wallet = wallets.find(w => w.id === setup.walletId);
@@ -315,7 +403,8 @@ async function showConfirmation(ctx: BotContext): Promise<void> {
     `💸 <b>USD per cycle:</b> $${setup.usdAmountPerCycle}\n` +
     `⏰ <b>Interval:</b> Every ${intervalLabel}\n` +
     `📉 <b>Slippage:</b> ${((setup.slippage ?? 0.01) * 100).toFixed(1)}%\n` +
-    `🔀 <b>Swapping to:</b> ${nativeCurrency} via KyberSwap\n` +
+    `🔀 <b>Swapping to:</b> ${setup.targetTokenSymbol || nativeCurrency} via KyberSwap\n` +
+    `🔄 <b>Cycles limit:</b> ${setup.maxCycles && setup.maxCycles > 0 ? `${setup.maxCycles} cycles` : 'Unlimited ♾️'}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
     `<i>Ready to start auto-selling? Hit the button below! 🚀</i>`;
 
@@ -355,6 +444,9 @@ export async function handleConfirmSession(ctx: BotContext, bot: any): Promise<v
     createdAt:        Date.now(),
     totalSoldUsd:     0,
     totalCycles:      0,
+    targetTokenAddress: setup.targetTokenAddress || KYBER_NATIVE,
+    targetTokenSymbol:  setup.targetTokenSymbol || CHAIN_CURRENCY[setup.chainId!],
+    maxCycles:          setup.maxCycles ?? 0,
   };
 
   if (!ctx.session.liquidationSessions) ctx.session.liquidationSessions = [];
@@ -411,10 +503,12 @@ export async function handleViewSessions(ctx: BotContext): Promise<void> {
     const status = s.active && !s.pausedByLowBalance ? '🟢' : s.pausedByLowBalance ? '⚠️' : '🔴';
     const lastRan = s.lastRanAt ? new Date(s.lastRanAt).toLocaleString() : 'Never';
     const intervalLabel = s.intervalMinutes < 60 ? `${s.intervalMinutes}m` : `${s.intervalMinutes / 60}h`;
+    const targetSymbol = s.targetTokenSymbol || CHAIN_CURRENCY[s.chainId];
+    const cyclesLimitStr = s.maxCycles && s.maxCycles > 0 ? s.maxCycles.toString() : '∞';
 
-    text += `${status} <b>${esc(s.tokenSymbol)}</b> — ${CHAIN_NAMES[s.chainId]}\n`;
+    text += `${status} <b>${esc(s.tokenSymbol)}</b> ➡️ <b>${targetSymbol}</b> — ${CHAIN_NAMES[s.chainId]}\n`;
     text += `   💸 $${s.usdAmountPerCycle} every ${intervalLabel}\n`;
-    text += `   📊 Cycles: ${s.totalCycles} | Total: $${s.totalSoldUsd.toFixed(2)}\n`;
+    text += `   📊 Cycles: ${s.totalCycles}/${cyclesLimitStr} | Total: $${s.totalSoldUsd.toFixed(2)}\n`;
     text += `   🕐 Last ran: ${lastRan}\n`;
     if (s.pausedByLowBalance) text += `   ⚠️ <i>Auto-paused (low balance)</i>\n`;
     text += `\n`;
