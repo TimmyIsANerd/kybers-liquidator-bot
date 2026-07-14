@@ -11,6 +11,7 @@ import { CHAIN_NAMES, CHAIN_CURRENCY } from '../../types/index.js';
 import { resolveToken } from '../../services/tokenService.js';
 import { decryptWallet, maskAddress } from '../../services/walletService.js';
 import { liquidationEngine } from '../../services/liquidationEngine.js';
+import { mongoStorage } from '../../storage/mongodb.js';
 import { KYBER_NATIVE, USDT_ADDRESS } from '../../config/chains.js';
 import { randomBytes } from 'node:crypto';
 
@@ -519,6 +520,8 @@ export async function handleConfirmSession(ctx: BotContext, bot: any): Promise<v
   try {
     const decrypted = decryptWallet(encWallet);
     const userId = ctx.from!.id.toString();
+    // Persist immediately to prevent race conditions during instant cycle startup
+    await mongoStorage.write(userId, ctx.session);
     liquidationEngine.start(bot, session, decrypted, userId);
   } catch (err: any) {
     console.error('[SESSION] Failed to start engine:', err);
@@ -638,6 +641,7 @@ export async function handleResumeAll(ctx: BotContext, bot: any): Promise<void> 
   const sessions = ctx.session.liquidationSessions ?? [];
   const wallets = ctx.session.wallets ?? [];
   let count = 0;
+  const toStart: Array<{ session: LiquidationSession; dec: any }> = [];
 
   for (const s of sessions) {
     if (!s.active && !s.pausedByLowBalance) {
@@ -646,10 +650,19 @@ export async function handleResumeAll(ctx: BotContext, bot: any): Promise<void> 
       if (encWallet) {
         try {
           const dec = decryptWallet(encWallet);
-          liquidationEngine.start(bot, s, dec, ctx.from!.id.toString());
+          toStart.push({ session: s, dec });
           count++;
-        } catch (err) { console.error('Resume failed:', err); }
+        } catch (err) { console.error('Resume decryption failed:', err); }
       }
+    }
+  }
+
+  if (toStart.length > 0) {
+    const userId = ctx.from!.id.toString();
+    // Persist immediately to prevent race conditions during instant cycle startup
+    await mongoStorage.write(userId, ctx.session);
+    for (const item of toStart) {
+      liquidationEngine.start(bot, item.session, item.dec, userId);
     }
   }
 
