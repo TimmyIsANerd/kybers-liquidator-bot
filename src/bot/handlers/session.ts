@@ -456,6 +456,10 @@ export async function showConfirmation(ctx: BotContext): Promise<void> {
     .row()
     .text('❌ Cancel', 'nav:sessions');
 
+  const amountLabel = setup.sellPercentage
+    ? `<b>Sell percentage:</b> ${setup.sellPercentage}% of balance`
+    : `<b>USD per cycle:</b> $${setup.usdAmountPerCycle}`;
+
   const text =
     `🎯 <b>Confirm Liquidation Session</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
@@ -463,7 +467,7 @@ export async function showConfirmation(ctx: BotContext): Promise<void> {
     `🔗 <b>Chain:</b> ${chainName}\n` +
     `🪙 <b>Token:</b> ${esc(setup.tokenName!)} (${esc(setup.tokenSymbol!)})\n` +
     `📍 <b>Contract:</b> <code>${setup.tokenAddress!.slice(0, 8)}...${setup.tokenAddress!.slice(-6)}</code>\n` +
-    `💸 <b>USD per cycle:</b> $${setup.usdAmountPerCycle}\n` +
+    `💸 ${amountLabel}\n` +
     `⏰ <b>Interval:</b> Every ${intervalLabel}\n` +
     `📉 <b>Slippage:</b> ${((setup.slippage ?? 0.01) * 100).toFixed(1)}%\n` +
     `🔀 <b>Swapping to:</b> ${setup.targetTokenSymbol || nativeCurrency} via KyberSwap\n` +
@@ -501,6 +505,7 @@ export async function handleConfirmSession(ctx: BotContext, bot: any): Promise<v
     tokenLogo:        setup.tokenLogo,
     tokenDecimals:    setup.tokenDecimals!,
     usdAmountPerCycle: setup.usdAmountPerCycle!,
+    sellPercentage:    setup.sellPercentage,
     intervalMinutes:  setup.intervalMinutes!,
     slippage:         setup.slippage ?? 0.01,
     active:           true,
@@ -531,12 +536,16 @@ export async function handleConfirmSession(ctx: BotContext, bot: any): Promise<v
     ? `${session.intervalMinutes} minutes`
     : `${session.intervalMinutes / 60} hours`;
 
+  const amountLabel = session.sellPercentage
+    ? `${session.sellPercentage}% of balance`
+    : `$${session.usdAmountPerCycle}`;
+
   await ctx.editMessageText(
     `🚀 <b>Liquidation Session Started!</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
     `🟢 Status: <b>ACTIVE</b>\n` +
     `🪙 Token: <b>${esc(session.tokenSymbol)}</b>\n` +
-    `💸 Selling: <b>$${session.usdAmountPerCycle}</b> every <b>${intervalLabel}</b>\n` +
+    `💸 Selling: <b>${amountLabel}</b> every <b>${intervalLabel}</b>\n` +
     `🔗 Chain: ${CHAIN_NAMES[session.chainId]}\n\n` +
     `✅ You'll receive a notification after each successful sell.\n\n` +
     `<i>Use /sessions to view and manage your sessions.</i>`,
@@ -570,9 +579,10 @@ export async function handleViewSessions(ctx: BotContext): Promise<void> {
     const intervalLabel = s.intervalMinutes < 60 ? `${s.intervalMinutes}m` : `${s.intervalMinutes / 60}h`;
     const targetSymbol = s.targetTokenSymbol || CHAIN_CURRENCY[s.chainId];
     const cyclesLimitStr = s.maxCycles && s.maxCycles > 0 ? s.maxCycles.toString() : '∞';
+    const amountLabel = s.sellPercentage ? `${s.sellPercentage}%` : `$${s.usdAmountPerCycle}`;
 
     text += `${status} <b>${esc(s.tokenSymbol)}</b> ➡️ <b>${targetSymbol}</b> — ${CHAIN_NAMES[s.chainId]}\n`;
-    text += `   💸 $${s.usdAmountPerCycle} every ${intervalLabel}\n`;
+    text += `   💸 ${amountLabel} every ${intervalLabel}\n`;
     text += `   📊 Cycles: ${s.totalCycles}/${cyclesLimitStr} | Total: $${s.totalSoldUsd.toFixed(2)}\n`;
     text += `   🕐 Last ran: ${lastRan}\n`;
     if (s.pausedByLowBalance) text += `   ⚠️ <i>Auto-paused (low balance)</i>\n`;
