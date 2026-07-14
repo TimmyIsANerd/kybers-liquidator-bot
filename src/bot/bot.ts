@@ -29,10 +29,12 @@ import {
   processSessionTokenAddress,
   handleSessionTargetChosen,
   handleSessionUsdAmount,
+  handleSessionPctChosen,
   handleSessionCyclesChosen,
   processSessionCustomCycles,
   handleSessionInterval,
   processSessionCustomUsd,
+  processSessionCustomPct,
   processSessionCustomInterval,
   handleConfirmSession,
   handleViewSessions,
@@ -227,6 +229,25 @@ export function createBot(): Bot<BotContext> {
       return handleSessionUsdAmount(ctx, parseFloat(val));
     }
 
+    // Wizard: Percentage preset
+    if (data.startsWith('session:setup:pct:')) {
+      const val = data.replace('session:setup:pct:', '');
+      if (val === 'custom') {
+        if (ctx.session.pendingSessionSetup) {
+          ctx.session.pendingSessionSetup.step = 'sell_percentage';
+        }
+        const msg = await ctx.reply(
+          `✏️ <b>Custom Sell Percentage</b>\n\nEnter the percentage of your holdings to sell per cycle (e.g. 15):`,
+          { parse_mode: 'HTML' },
+        );
+        if (ctx.session.pendingSessionSetup) {
+          ctx.session.pendingSessionSetup.promptMessageId = msg.message_id;
+        }
+        return;
+      }
+      return handleSessionPctChosen(ctx, parseFloat(val));
+    }
+
     // Wizard: cycles preset
     if (data.startsWith('session:setup:cycles:')) {
       const val = data.replace('session:setup:cycles:', '');
@@ -324,6 +345,9 @@ export function createBot(): Bot<BotContext> {
       }
       if (setup.step === 'usd_amount') {
         return processSessionCustomUsd(ctx, text.trim());
+      }
+      if (setup.step === 'sell_percentage') {
+        return processSessionCustomPct(ctx, text.trim());
       }
       if (setup.step === 'max_cycles') {
         return processSessionCustomCycles(ctx, text.trim());

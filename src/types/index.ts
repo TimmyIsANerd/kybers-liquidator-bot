@@ -49,6 +49,8 @@ export interface LiquidationSession {
   tokenDecimals: number;
   /** USD amount to sell per cycle */
   usdAmountPerCycle: number;
+  /** Percentage of wallet token balance to sell per cycle (1-100) */
+  sellPercentage?: number;
   /** Interval in minutes — minimum 5 */
   intervalMinutes: number;
   /** Slippage as decimal, e.g. 0.01 = 1% */
@@ -78,7 +80,7 @@ export interface PendingWalletImport {
 }
 
 export interface PendingSessionSetup {
-  step: 'chain' | 'token' | 'target_asset' | 'usd_amount' | 'max_cycles' | 'interval' | 'slippage' | 'confirm';
+  step: 'chain' | 'token' | 'target_asset' | 'usd_amount' | 'sell_percentage' | 'max_cycles' | 'interval' | 'slippage' | 'confirm';
   walletId?: string;
   chainId?: SupportedChain;
   tokenAddress?: string;
@@ -87,6 +89,7 @@ export interface PendingSessionSetup {
   tokenLogo?: string;
   tokenDecimals?: number;
   usdAmountPerCycle?: number;
+  sellPercentage?: number;
   intervalMinutes?: number;
   slippage?: number;
   promptMessageId?: number;

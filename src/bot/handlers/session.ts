@@ -215,20 +215,31 @@ export async function handleSessionTargetChosen(ctx: BotContext, target: 'native
   setup.targetTokenSymbol  = target === 'native' ? CHAIN_CURRENCY[setup.chainId] : 'USDT';
   setup.step               = 'usd_amount';
 
-  // Build USD preset keyboard
-  const keyboard = new InlineKeyboard();
-  USD_PRESETS.forEach((usd, i) => {
-    keyboard.text(`$${usd}`, `session:setup:usd:${usd}`);
-    if ((i + 1) % 3 === 0) keyboard.row();
-  });
-  keyboard.row().text('✏️ Custom Amount', 'session:setup:usd:custom').row();
-  keyboard.text('❌ Cancel', 'nav:sessions');
+  // Build USD & Percentage mixed preset keyboard
+  const keyboard = new InlineKeyboard()
+    .text('$10', 'session:setup:usd:10')
+    .text('$50', 'session:setup:usd:50')
+    .text('$100', 'session:setup:usd:100')
+    .row()
+    .text('$250', 'session:setup:usd:250')
+    .text('$500', 'session:setup:usd:500')
+    .text('$1000', 'session:setup:usd:1000')
+    .row()
+    .text('10%', 'session:setup:pct:10')
+    .text('25%', 'session:setup:pct:25')
+    .text('50%', 'session:setup:pct:50')
+    .text('100% (All)', 'session:setup:pct:100')
+    .row()
+    .text('✏️ Custom USD', 'session:setup:usd:custom')
+    .text('✏️ Custom %', 'session:setup:pct:custom')
+    .row()
+    .text('❌ Cancel', 'nav:sessions');
 
   const text =
     `⚙️ <b>New Liquidation Session</b>\n` +
-    `<b>Step 5 of 7:</b> How much USD to sell per cycle? 💸\n\n` +
+    `<b>Step 5 of 7:</b> Sell Amount per Cycle 💸\n\n` +
     `Swapping to: <b>${setup.targetTokenSymbol}</b>\n\n` +
-    `Select a preset or enter a custom USD amount:`;
+    `Select a fixed USD amount or a percentage of the wallet's token holdings to sell per cycle:`;
 
   if (ctx.callbackQuery?.message) {
     try { await ctx.api.deleteMessage(ctx.chat!.id, ctx.callbackQuery.message.message_id); } catch { /* ignore */ }
@@ -237,12 +248,13 @@ export async function handleSessionTargetChosen(ctx: BotContext, target: 'native
   await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
 }
 
-// ─── Step 5: USD Amount ───────────────────────────────────────────────────────
+// ─── Step 5: USD / Percentage Amount ──────────────────────────────────────────
 
 export async function handleSessionUsdAmount(ctx: BotContext, usdAmount: number): Promise<void> {
   const setup = ctx.session.pendingSessionSetup;
   if (!setup) return;
   setup.usdAmountPerCycle = usdAmount;
+  setup.sellPercentage = undefined; // Clear percentage
   setup.step = 'max_cycles';
 
   const keyboard = new InlineKeyboard()
@@ -273,7 +285,42 @@ export async function handleSessionUsdAmount(ctx: BotContext, usdAmount: number)
   await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
 }
 
-// ─── Handle custom USD input ──────────────────────────────────────────────────
+export async function handleSessionPctChosen(ctx: BotContext, pct: number): Promise<void> {
+  const setup = ctx.session.pendingSessionSetup;
+  if (!setup) return;
+  setup.sellPercentage = pct;
+  setup.usdAmountPerCycle = 0; // Clear USD
+  setup.step = 'max_cycles';
+
+  const keyboard = new InlineKeyboard()
+    .text('Unlimited ♾️', 'session:setup:cycles:0')
+    .row()
+    .text('5 times', 'session:setup:cycles:5')
+    .text('10 times', 'session:setup:cycles:10')
+    .row()
+    .text('20 times', 'session:setup:cycles:20')
+    .text('50 times', 'session:setup:cycles:50')
+    .row()
+    .text('✏️ Custom Cycles', 'session:setup:cycles:custom')
+    .row()
+    .text('❌ Cancel', 'nav:sessions');
+
+  const text =
+    `⚙️ <b>New Liquidation Session</b>\n\n` +
+    `<b>Step 6 of 7:</b> Set Cycle Limit 🔄\n\n` +
+    `Sell percentage: <b>${pct}% of balance</b>\n` +
+    `Swapping to: <b>${setup.targetTokenSymbol}</b>\n\n` +
+    `How many times/cycles do you want to sell?\n` +
+    `<i>Choose a preset or enter custom value (e.g. 15). Select Unlimited to sell indefinitely.</i>`;
+
+  if (ctx.callbackQuery?.message) {
+    try { await ctx.api.deleteMessage(ctx.chat!.id, ctx.callbackQuery.message.message_id); } catch { /* ignore */ }
+  }
+
+  await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
+}
+
+// ─── Handle custom USD / Percentage inputs ────────────────────────────────────
 
 export async function processSessionCustomUsd(ctx: BotContext, text: string): Promise<void> {
   const setup = ctx.session.pendingSessionSetup;
@@ -286,6 +333,19 @@ export async function processSessionCustomUsd(ctx: BotContext, text: string): Pr
   }
 
   await handleSessionUsdAmount(ctx, amount);
+}
+
+export async function processSessionCustomPct(ctx: BotContext, text: string): Promise<void> {
+  const setup = ctx.session.pendingSessionSetup;
+  if (!setup || setup.step !== 'sell_percentage') return;
+
+  const pct = parseFloat(text);
+  if (isNaN(pct) || pct <= 0 || pct > 100) {
+    await ctx.reply('❌ Please enter a valid percentage between 1 and 100 (e.g. 25):', { parse_mode: 'HTML' });
+    return;
+  }
+
+  await handleSessionPctChosen(ctx, pct);
 }
 
 // ─── Step 6: Choose Cycles Limit ──────────────────────────────────────────────
@@ -307,10 +367,12 @@ export async function handleSessionCyclesChosen(ctx: BotContext, maxCycles: numb
   keyboard.text('❌ Cancel', 'nav:sessions');
 
   const cyclesLabel = maxCycles > 0 ? `${maxCycles} cycles` : 'Unlimited ♾️';
+  const amountLabel = setup.sellPercentage ? `${setup.sellPercentage}% of balance` : `$${setup.usdAmountPerCycle}`;
+
   const text =
     `⚙️ <b>New Liquidation Session</b>\n\n` +
     `<b>Step 7 of 7:</b> Choose Interval ⏰\n\n` +
-    `USD per cycle: <b>$${setup.usdAmountPerCycle}</b>\n` +
+    `Sell Amount: <b>${amountLabel}</b>\n` +
     `Swapping to: <b>${setup.targetTokenSymbol}</b>\n` +
     `Cycles limit: <b>${cyclesLabel}</b>\n\n` +
     `How often should the bot sell?\n` +

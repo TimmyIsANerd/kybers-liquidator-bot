@@ -251,10 +251,18 @@ class LiquidationEngine {
       let rawAmountIn: bigint;
       const maxRawAmountIn = balance;
 
-      try {
-        rawAmountIn = usdToTokenAmountRaw(session.usdAmountPerCycle, priceUsd, session.tokenDecimals);
-      } catch {
-        rawAmountIn = 0n;
+      if (session.sellPercentage && session.sellPercentage > 0) {
+        const pct = Math.min(Math.max(session.sellPercentage, 1), 100);
+        rawAmountIn = (balance * BigInt(Math.floor(pct * 100))) / 10000n;
+        if (rawAmountIn === 0n && balance > 0n) {
+          rawAmountIn = 1n;
+        }
+      } else {
+        try {
+          rawAmountIn = usdToTokenAmountRaw(session.usdAmountPerCycle, priceUsd, session.tokenDecimals);
+        } catch {
+          rawAmountIn = 0n;
+        }
       }
 
       // If balance less than target amount — sell remaining or auto-pause
