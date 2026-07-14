@@ -40,6 +40,21 @@ axiosRetry(kyberAxios, {
     (e.response && (e.response.status === 429 || e.response.status >= 500)),
 });
 
+kyberAxios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response && error.response.data) {
+      const data = error.response.data;
+      const apiMsg = data.message || data.description || JSON.stringify(data);
+      const customError = new Error(`KyberSwap API Error (HTTP ${error.response.status}): ${apiMsg}`);
+      (customError as any).status = error.response.status;
+      (customError as any).data = data;
+      return Promise.reject(customError);
+    }
+    return Promise.reject(error);
+  }
+);
+
 // ─── Headers ─────────────────────────────────────────────────────────────────
 
 function getHeaders() {
